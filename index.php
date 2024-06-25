@@ -1,94 +1,59 @@
 <?php
 
-function getBookDetailsFromGoogleAPI($title)
-{
-    $url = 'https://www.googleapis.com/books/v1/volumes?q=intitle:' . urlencode($title);
-
-    $response = file_get_contents($url);
+function getBookDetailsFromGoogleAPI($title, $author) {
+    // Construct the URL to search for title and author
+    $url = 'https://www.googleapis.com/books/v1/volumes?q=intitle:' . urlencode($title) . '+inauthor:' . urlencode($author);
+    $response = @file_get_contents($url);
 
     if ($response === false) {
+        echo "Error fetching data from Google Books API for title '$title' and author '$author'.\n";
         return false;
     }
 
     $data = json_decode($response, true);
 
-    if (isset($data['items'])) {
-        foreach ($data['items'] as $item) {
-            $volumeInfo = $item['volumeInfo'];
+    // Check if there are any items (books) found
+    if (isset($data['items']) && count($data['items']) > 0) {
+        // Get the first book (most relevant result)
+        $book = $data['items'][0];
+        $volumeInfo = $book['volumeInfo'];
 
-            $isbn10 = '';
-            $isbn13 = '';
-
-            if (isset($volumeInfo['industryIdentifiers'])) {
-                foreach ($volumeInfo['industryIdentifiers'] as $identifier) {
-                    if ($identifier['type'] == 'ISBN_10') {
-                        $isbn10 = $identifier['identifier'];
-                    } elseif ($identifier['type'] == 'ISBN_13') {
-                        $isbn13 = $identifier['identifier'];
-                    }
-                }
-            }
-
-            if (!empty($isbn10) || !empty($isbn13)) {
-                return [
-                    'Title' => $title,
-                    'ISBN10' => !empty($isbn10) ? $isbn10 : 'ISBN10 Unavailable',
-                    'ISBN13' => !empty($isbn13) ? $isbn13 : 'ISBN13 Unavailable',
-                ];
-            }
-        }
-    }
-
-    return false;
-}
-
-function getBookDetailsFromOpenLibraryAPI($title)
-{
-    $url = 'https://openlibrary.org/search.json?q=' . urlencode($title);
-
-    $response = file_get_contents($url);
-
-    if ($response === false) {
-        return false;
-    }
-
-    $data = json_decode($response, true);
-
-    if (isset($data['docs'][0])) {
-        $bookInfo = $data['docs'][0];
-
+        // Fetch ISBNs if available
         $isbn10 = '';
         $isbn13 = '';
-
-        if (isset($bookInfo['isbn'])) {
-            foreach ($bookInfo['isbn'] as $isbn) {
-                if (strlen($isbn) == 10) {
-                    $isbn10 = $isbn;
-                } elseif (strlen($isbn) == 13) {
-                    $isbn13 = $isbn;
+        if (isset($volumeInfo['industryIdentifiers'])) {
+            foreach ($volumeInfo['industryIdentifiers'] as $identifier) {
+                if ($identifier['type'] === 'ISBN_10') {
+                    $isbn10 = $identifier['identifier'];
+                } elseif ($identifier['type'] === 'ISBN_13') {
+                    $isbn13 = $identifier['identifier'];
                 }
             }
         }
 
         return [
-            'Title' => $title,
-            'ISBN10' => !empty($isbn10) ? $isbn10 : 'ISBN10 Unavailable',
-            'ISBN13' => !empty($isbn13) ? $isbn13 : 'ISBN13 Unavailable',
+            'Title' => $volumeInfo['title'],
+            // 'Authors' => implode(', ', $volumeInfo['authors']),
+            'Authors' => $author,
+            'ISBN10' => $isbn10,
+            'ISBN13' => $isbn13,
+            'PublisherName' => $volumeInfo['publisher'] ?? '',
         ];
     }
 
+    echo "No matching book found for title '$title' and author '$author' in Google Books API.\n";
     return false;
 }
 
-function exportToCSV($filename, $data)
-{
-    $fp = fopen($filename, 'w');
+function exportToCSV($filename, $data) {
+    if (($fp = fopen($filename, 'w')) === false) {
+        echo "Error creating file '$filename'.\n";
+        return;
+    }
 
-    // Modify the headers to include Biblionumber
-    fputcsv($fp, ['Title', 'ISBN10', 'ISBN13', 'Biblionumber']);
+    fputcsv($fp, ['Title', 'Authors', 'ISBN10', 'ISBN13', 'Biblionumber', 'PublisherName']);
 
     foreach ($data as $row) {
-        // Append Biblionumber to each row
         fputcsv($fp, $row);
     }
 
@@ -97,57 +62,68 @@ function exportToCSV($filename, $data)
     echo "CSV file '$filename' has been successfully created with book details.\n";
 }
 
-$inputFilename = 'uniquetitle.csv';
-$outputFilename = 'exportedreport.csv';
+function processCSV($inputFilename, $outputFilename) {
+    if (($handle = fopen($inputFilename, 'r')) === false) {
+        echo "Error opening file '$inputFilename'.\n";
+        return;
+    }
 
-if (($handle = fopen($inputFilename, 'r')) !== false) {
     $allBookDetails = [];
+    $header = fgetcsv($handle); // Get header row (assuming it's skipped)
+    $numColumns = count($header); // Number of columns in CSV
 
     while (($data = fgetcsv($handle, 1000, '~')) !== false) {
-        $title = isset($data[1]) ? trim($data[1]) : '';
-        $biblionumber = isset($data[3]) ? trim($data[3]) : ''; // Read Biblionumber from CSV
+        // Extract fields from CSV row with increased positions
+        $titleFromCSV = isset($data[1]) ? trim($data[1]) : '';
+        $author = isset($data[2]) ? trim($data[2]) : '';
+        $biblionumber = isset($data[3]) ? trim($data[3]) : ''; // Biblionumber from CSV
+        $publishername = isset($data[4]) ? trim($data[4]) : ''; // Publisher from CSV
 
-        if (!empty($title)) {
-            $bookDetails = getBookDetailsFromGoogleAPI($title);
+        if (!empty($titleFromCSV) && !empty($author)) {
+            echo "Fetching book: $titleFromCSV by $author\n";
 
-            if ($bookDetails !== false) {
-                // Include Biblionumber in the book details array
-                $bookDetails['Biblionumber'] = $biblionumber;
-                $allBookDetails[] = [
-                    $bookDetails['Title'],
-                    $bookDetails['ISBN10'],
-                    $bookDetails['ISBN13'],
-                    $bookDetails['Biblionumber'], // Add Biblionumber to the row
-                ];
-                continue; // Skip Open Library API if Google Books API found ISBN
-            }
-
-            $bookDetails = getBookDetailsFromOpenLibraryAPI($title);
+            // Fetch book details from Google Books API
+            $bookDetails = getBookDetailsFromGoogleAPI($titleFromCSV, $author);
 
             if ($bookDetails !== false) {
-                // Include Biblionumber in the book details array
-                $bookDetails['Biblionumber'] = $biblionumber;
                 $allBookDetails[] = [
                     $bookDetails['Title'],
+                    $bookDetails['Authors'],
                     $bookDetails['ISBN10'],
                     $bookDetails['ISBN13'],
-                    $bookDetails['Biblionumber'], // Add Biblionumber to the row
+                    $biblionumber, // Use Biblionumber from CSV
+                    $publishername, // Use Publisher from CSV
                 ];
             } else {
                 $allBookDetails[] = [
-                    $title,
-                    'ISBN10 Unavailable',
-                    'ISBN13 Unavailable',
-                    $biblionumber, // Add Biblionumber even if book details are unavailable
+                    $titleFromCSV,
+                    $author,
+                    '', // Placeholder for ISBN10 (not fetched)
+                    '', // Placeholder for ISBN13 (not fetched)
+                    $biblionumber,
+                    $publishername,
                 ];
             }
+        } else {
+            $allBookDetails[] = [
+                $titleFromCSV,
+                $author,
+                '',
+                '',
+                $biblionumber,
+                $publishername,
+            ];
         }
     }
 
     fclose($handle);
 
+    // Export collected book details to CSV
     exportToCSV($outputFilename, $allBookDetails);
-} else {
-    echo "Error opening file $inputFilename\n";
 }
+
+$inputFilename = 'abc.csv';
+$outputFilename = 'a.csv';
+
+processCSV($inputFilename, $outputFilename);
 ?>
